@@ -3,7 +3,7 @@ package channel
 import (
 	"sync"
 
-	"github.com/kidandcat/voicechat/internal/database"
+	"github.com/kidandcat/vocipher/internal/database"
 )
 
 type Channel struct {

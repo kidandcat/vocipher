@@ -1,4 +1,4 @@
-module github.com/kidandcat/voicechat
+module github.com/kidandcat/vocipher
 
 go 1.25.5
 

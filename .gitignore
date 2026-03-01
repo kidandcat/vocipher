@@ -1,6 +1,6 @@
-voicechat.db
-voicechat.db-wal
-voicechat.db-shm
+vocipher.db
+vocipher.db-wal
+vocipher.db-shm
 *.exe
 *.dll
 *.so
@@ -8,4 +8,4 @@ voicechat.db-shm
 /tmp/
 .DS_Store
 server
-voicechat
+vocipher

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/kidandcat/voicechat/internal/database"
+	"github.com/kidandcat/vocipher/internal/database"
 	"golang.org/x/crypto/bcrypt"
 )
 

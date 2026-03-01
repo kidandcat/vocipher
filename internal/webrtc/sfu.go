@@ -3,8 +3,10 @@ package webrtc
 import (
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -15,9 +17,12 @@ type Peer struct {
 	PC       *webrtc.PeerConnection
 	// Audio track this peer is sending
 	audioTrack *webrtc.TrackRemote
+	// Video track this peer is sending (screen share)
+	videoTrack *webrtc.TrackRemote
 	// Local tracks we forward to this peer (from other peers)
-	outputTracks map[int64]*webrtc.TrackLocalStaticRTP // srcUserID -> local track
-	mu           sync.Mutex
+	outputTracks      map[int64]*webrtc.TrackLocalStaticRTP // srcUserID -> local audio track
+	videoOutputTracks map[int64]*webrtc.TrackLocalStaticRTP // srcUserID -> local video track
+	mu                sync.Mutex
 }
 
 // SFU manages all peer connections for a channel.
@@ -92,78 +97,66 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 		SDP:  offerSDP,
 	}
 
+	// Check if this is a renegotiation for an existing peer
+	s.mu.RLock()
+	existingPeer, exists := s.peers[userID]
+	s.mu.RUnlock()
+
+	if exists {
+		// Remember if peer had video before renegotiation
+		hadVideo := existingPeer.videoTrack != nil
+
+		// Renegotiation: reuse existing PeerConnection
+		if err := existingPeer.PC.SetRemoteDescription(offer); err != nil {
+			return err
+		}
+
+		answer, err := existingPeer.PC.CreateAnswer(nil)
+		if err != nil {
+			return err
+		}
+
+		if err := existingPeer.PC.SetLocalDescription(answer); err != nil {
+			return err
+		}
+
+		data, _ := json.Marshal(map[string]any{
+			"type": "webrtc_answer",
+			"payload": map[string]any{
+				"sdp": answer.SDP,
+			},
+		})
+		s.SendMessage(userID, data)
+
+		// Check if peer stopped sending video (screen share ended)
+		if hadVideo && !sdpHasVideoSending(offerSDP) {
+			go s.cleanupVideoTrack(existingPeer, userID)
+		}
+
+		return nil
+	}
+
+	// New peer: create new PeerConnection
 	pc, err := api.NewPeerConnection(newPeerConnectionConfig())
 	if err != nil {
 		return err
 	}
 
 	peer := &Peer{
-		UserID:       userID,
-		Username:     username,
-		PC:           pc,
-		outputTracks: make(map[int64]*webrtc.TrackLocalStaticRTP),
+		UserID:            userID,
+		Username:          username,
+		PC:                pc,
+		outputTracks:      make(map[int64]*webrtc.TrackLocalStaticRTP),
+		videoOutputTracks: make(map[int64]*webrtc.TrackLocalStaticRTP),
 	}
 
-	// Add existing peers' audio as tracks to this new peer
-	s.mu.RLock()
-	for srcID, existingPeer := range s.peers {
-		if existingPeer.audioTrack != nil {
-			if err := s.addTrackForPeer(peer, srcID, existingPeer.audioTrack); err != nil {
-				log.Printf("webrtc: failed to add existing track from user %d to user %d: %v", srcID, userID, err)
-			}
-		}
-	}
-	s.mu.RUnlock()
-
-	// Handle incoming audio tracks from this peer
+	// Handle incoming tracks from this peer
 	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
-		if track.Kind() != webrtc.RTPCodecTypeAudio {
-			return
-		}
-		log.Printf("webrtc: received audio track from user %d (%s)", userID, username)
-
-		s.mu.Lock()
-		peer.audioTrack = track
-		s.mu.Unlock()
-
-		// Create output tracks for all other peers
-		s.mu.RLock()
-		for otherID, otherPeer := range s.peers {
-			if otherID == userID {
-				continue
-			}
-			if err := s.addTrackForPeer(otherPeer, userID, track); err != nil {
-				log.Printf("webrtc: failed to add track from user %d to user %d: %v", userID, otherID, err)
-			} else {
-				// Renegotiate with the other peer
-				s.renegotiate(otherPeer)
-			}
-		}
-		s.mu.RUnlock()
-
-		// Forward RTP packets
-		buf := make([]byte, 1500)
-		for {
-			n, _, readErr := track.Read(buf)
-			if readErr != nil {
-				log.Printf("webrtc: track read ended for user %d: %v", userID, readErr)
-				return
-			}
-
-			s.mu.RLock()
-			for otherID, otherPeer := range s.peers {
-				if otherID == userID {
-					continue
-				}
-				otherPeer.mu.Lock()
-				if lt, ok := otherPeer.outputTracks[userID]; ok {
-					if _, writeErr := lt.Write(buf[:n]); writeErr != nil {
-						log.Printf("webrtc: write to user %d failed: %v", otherID, writeErr)
-					}
-				}
-				otherPeer.mu.Unlock()
-			}
-			s.mu.RUnlock()
+		switch track.Kind() {
+		case webrtc.RTPCodecTypeAudio:
+			s.handleAudioTrack(peer, userID, username, track)
+		case webrtc.RTPCodecTypeVideo:
+			s.handleVideoTrack(peer, userID, username, track)
 		}
 	})
 
@@ -181,9 +174,20 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 		s.SendMessage(userID, data)
 	})
 
+	// Use sync.Once to add existing tracks only after connection is established
+	var addExistingOnce sync.Once
+
 	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		log.Printf("webrtc: peer %d (%s) connection state: %s", userID, username, state.String())
-		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateDisconnected {
+
+		if state == webrtc.PeerConnectionStateConnected {
+			// Add existing tracks from other peers once ICE is established
+			addExistingOnce.Do(func() {
+				go s.addExistingTracksForPeer(peer, userID)
+			})
+		}
+
+		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed {
 			s.RemovePeer(userID)
 		}
 	})
@@ -208,10 +212,6 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 
 	// Register peer
 	s.mu.Lock()
-	// Close old peer connection if exists
-	if old, ok := s.peers[userID]; ok {
-		old.PC.Close()
-	}
 	s.peers[userID] = peer
 	s.mu.Unlock()
 
@@ -225,6 +225,82 @@ func (s *SFU) HandleOffer(userID int64, username string, offerSDP string) error 
 	s.SendMessage(userID, data)
 
 	return nil
+}
+
+// sdpHasVideoSending checks if the SDP has an active video m-line sending data.
+func sdpHasVideoSending(sdp string) bool {
+	lines := strings.Split(sdp, "\n")
+	inVideo := false
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "m=video") {
+			inVideo = true
+		} else if strings.HasPrefix(line, "m=") {
+			inVideo = false
+		}
+		if inVideo && (line == "a=sendrecv" || line == "a=sendonly") {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanupVideoTrack removes video output tracks from all peers when screen share ends.
+func (s *SFU) cleanupVideoTrack(peer *Peer, userID int64) {
+	log.Printf("webrtc: cleaning up video track for user %d (screen share ended via renegotiation)", userID)
+
+	s.mu.Lock()
+	peer.videoTrack = nil
+	for otherID, otherPeer := range s.peers {
+		if otherID == userID {
+			continue
+		}
+		otherPeer.mu.Lock()
+		delete(otherPeer.videoOutputTracks, userID)
+		otherPeer.mu.Unlock()
+	}
+	s.mu.Unlock()
+
+	// Renegotiate with all other peers to remove the video track
+	s.mu.RLock()
+	for otherID, otherPeer := range s.peers {
+		if otherID == userID {
+			continue
+		}
+		s.renegotiate(otherPeer)
+	}
+	s.mu.RUnlock()
+}
+
+// addExistingTracksForPeer adds audio/video tracks from other peers and renegotiates.
+// Called in a goroutine after the connection is established.
+func (s *SFU) addExistingTracksForPeer(peer *Peer, userID int64) {
+	needsRenegotiation := false
+	s.mu.RLock()
+	for srcID, existingPeer := range s.peers {
+		if srcID == userID {
+			continue
+		}
+		if existingPeer.audioTrack != nil {
+			if err := s.addTrackForPeer(peer, srcID, existingPeer.audioTrack); err != nil {
+				log.Printf("webrtc: failed to add existing audio track from user %d to user %d: %v", srcID, userID, err)
+			} else {
+				needsRenegotiation = true
+			}
+		}
+		if existingPeer.videoTrack != nil {
+			if err := s.addVideoTrackForPeer(peer, srcID, existingPeer.videoTrack); err != nil {
+				log.Printf("webrtc: failed to add existing video track from user %d to user %d: %v", srcID, userID, err)
+			} else {
+				needsRenegotiation = true
+			}
+		}
+	}
+	s.mu.RUnlock()
+
+	if needsRenegotiation {
+		s.renegotiate(peer)
+	}
 }
 
 // HandleICECandidate adds a remote ICE candidate for a peer.
@@ -255,10 +331,11 @@ func (s *SFU) RemovePeer(userID int64) {
 	}
 	delete(s.peers, userID)
 
-	// Remove output tracks from other peers that were receiving this user's audio
+	// Remove output tracks from other peers that were receiving this user's audio/video
 	for _, otherPeer := range s.peers {
 		otherPeer.mu.Lock()
 		delete(otherPeer.outputTracks, userID)
+		delete(otherPeer.videoOutputTracks, userID)
 		otherPeer.mu.Unlock()
 	}
 	s.mu.Unlock()
@@ -268,6 +345,131 @@ func (s *SFU) RemovePeer(userID int64) {
 	}
 
 	log.Printf("webrtc: removed peer %d (%s)", userID, peer.Username)
+}
+
+func (s *SFU) handleAudioTrack(peer *Peer, userID int64, username string, track *webrtc.TrackRemote) {
+	log.Printf("webrtc: received audio track from user %d (%s)", userID, username)
+
+	s.mu.Lock()
+	peer.audioTrack = track
+	s.mu.Unlock()
+
+	// Create output tracks for all other peers
+	s.mu.RLock()
+	for otherID, otherPeer := range s.peers {
+		if otherID == userID {
+			continue
+		}
+		if err := s.addTrackForPeer(otherPeer, userID, track); err != nil {
+			log.Printf("webrtc: failed to add audio track from user %d to user %d: %v", userID, otherID, err)
+		} else {
+			s.renegotiate(otherPeer)
+		}
+	}
+	s.mu.RUnlock()
+
+	// Forward RTP packets
+	buf := make([]byte, 1500)
+	for {
+		n, _, readErr := track.Read(buf)
+		if readErr != nil {
+			log.Printf("webrtc: audio track read ended for user %d: %v", userID, readErr)
+			return
+		}
+
+		s.mu.RLock()
+		for otherID, otherPeer := range s.peers {
+			if otherID == userID {
+				continue
+			}
+			otherPeer.mu.Lock()
+			if lt, ok := otherPeer.outputTracks[userID]; ok {
+				if _, writeErr := lt.Write(buf[:n]); writeErr != nil {
+					log.Printf("webrtc: audio write to user %d failed: %v", otherID, writeErr)
+				}
+			}
+			otherPeer.mu.Unlock()
+		}
+		s.mu.RUnlock()
+	}
+}
+
+func (s *SFU) handleVideoTrack(peer *Peer, userID int64, username string, track *webrtc.TrackRemote) {
+	log.Printf("webrtc: received video track from user %d (%s)", userID, username)
+
+	s.mu.Lock()
+	peer.videoTrack = track
+	s.mu.Unlock()
+
+	// Create video output tracks for all other peers
+	s.mu.RLock()
+	for otherID, otherPeer := range s.peers {
+		if otherID == userID {
+			continue
+		}
+		if err := s.addVideoTrackForPeer(otherPeer, userID, track); err != nil {
+			log.Printf("webrtc: failed to add video track from user %d to user %d: %v", userID, otherID, err)
+		} else {
+			s.renegotiate(otherPeer)
+		}
+	}
+	s.mu.RUnlock()
+
+	// Send PLI to request a keyframe from the sender
+	if err := peer.PC.WriteRTCP([]rtcp.Packet{
+		&rtcp.PictureLossIndication{MediaSSRC: uint32(track.SSRC())},
+	}); err != nil {
+		log.Printf("webrtc: failed to send PLI for user %d: %v", userID, err)
+	}
+
+	// Forward RTP packets (larger buffer for video)
+	buf := make([]byte, 4096)
+	for {
+		n, _, readErr := track.Read(buf)
+		if readErr != nil {
+			log.Printf("webrtc: video track read ended for user %d: %v", userID, readErr)
+			break
+		}
+
+		s.mu.RLock()
+		for otherID, otherPeer := range s.peers {
+			if otherID == userID {
+				continue
+			}
+			otherPeer.mu.Lock()
+			if lt, ok := otherPeer.videoOutputTracks[userID]; ok {
+				if _, writeErr := lt.Write(buf[:n]); writeErr != nil {
+					log.Printf("webrtc: video write to user %d failed: %v", otherID, writeErr)
+				}
+			}
+			otherPeer.mu.Unlock()
+		}
+		s.mu.RUnlock()
+	}
+
+	// Video track ended (user stopped sharing) — clean up
+	log.Printf("webrtc: video track ended for user %d (%s), cleaning up", userID, username)
+	s.mu.Lock()
+	peer.videoTrack = nil
+	for otherID, otherPeer := range s.peers {
+		if otherID == userID {
+			continue
+		}
+		otherPeer.mu.Lock()
+		delete(otherPeer.videoOutputTracks, userID)
+		otherPeer.mu.Unlock()
+	}
+	s.mu.Unlock()
+
+	// Renegotiate with all other peers to remove the video track
+	s.mu.RLock()
+	for otherID, otherPeer := range s.peers {
+		if otherID == userID {
+			continue
+		}
+		s.renegotiate(otherPeer)
+	}
+	s.mu.RUnlock()
 }
 
 // addTrackForPeer creates a local track on destPeer that will receive RTP from srcTrack.
@@ -288,6 +490,31 @@ func (s *SFU) addTrackForPeer(destPeer *Peer, srcUserID int64, srcTrack *webrtc.
 	if _, err := destPeer.PC.AddTrack(localTrack); err != nil {
 		destPeer.mu.Lock()
 		delete(destPeer.outputTracks, srcUserID)
+		destPeer.mu.Unlock()
+		return err
+	}
+
+	return nil
+}
+
+// addVideoTrackForPeer creates a local video track on destPeer that will receive RTP from srcTrack.
+func (s *SFU) addVideoTrackForPeer(destPeer *Peer, srcUserID int64, srcTrack *webrtc.TrackRemote) error {
+	localTrack, err := webrtc.NewTrackLocalStaticRTP(
+		srcTrack.Codec().RTPCodecCapability,
+		srcTrack.ID(),
+		srcTrack.StreamID(),
+	)
+	if err != nil {
+		return err
+	}
+
+	destPeer.mu.Lock()
+	destPeer.videoOutputTracks[srcUserID] = localTrack
+	destPeer.mu.Unlock()
+
+	if _, err := destPeer.PC.AddTrack(localTrack); err != nil {
+		destPeer.mu.Lock()
+		delete(destPeer.videoOutputTracks, srcUserID)
 		destPeer.mu.Unlock()
 		return err
 	}

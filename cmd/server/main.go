@@ -5,21 +5,33 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"fmt"
 	"strconv"
 	"time"
 
-	"github.com/kidandcat/voicechat/internal/auth"
-	"github.com/kidandcat/voicechat/internal/channel"
-	"github.com/kidandcat/voicechat/internal/database"
-	"github.com/kidandcat/voicechat/internal/signaling"
+	"github.com/kidandcat/vocipher/internal/auth"
+	"github.com/kidandcat/vocipher/internal/channel"
+	"github.com/kidandcat/vocipher/internal/database"
+	"github.com/kidandcat/vocipher/internal/signaling"
 )
 
-var templates *template.Template
+var templates map[string]*template.Template
+var cacheBust = fmt.Sprintf("%d", time.Now().Unix())
+
+func loadTemplates() map[string]*template.Template {
+	layoutFile := filepath.Join("web", "templates", "layout.html")
+	pages := []string{"login.html", "register.html", "app.html"}
+	t := make(map[string]*template.Template, len(pages))
+	for _, page := range pages {
+		t[page] = template.Must(template.ParseFiles(layoutFile, filepath.Join("web", "templates", page)))
+	}
+	return t
+}
 
 func main() {
-	database.Init("voicechat.db")
+	database.Init("vocipher.db")
 
-	templates = template.Must(template.ParseGlob(filepath.Join("web", "templates", "*.html")))
+	templates = loadTemplates()
 
 	mux := http.NewServeMux()
 
@@ -40,7 +52,7 @@ func main() {
 	mux.HandleFunc("/ws", signaling.HandleWebSocket)
 
 	addr := ":8090"
-	log.Printf("VoiceChat server starting on http://localhost%s", addr)
+	log.Printf("Vocipher server starting on http://localhost%s", addr)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }
 
@@ -63,7 +75,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
-		templates.ExecuteTemplate(w, "login.html", nil)
+		templates["login.html"].ExecuteTemplate(w, "layout.html", nil)
 		return
 	}
 
@@ -72,13 +84,13 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := auth.Login(username, password)
 	if err != nil {
-		templates.ExecuteTemplate(w, "login.html", map[string]string{"Error": "Invalid username or password"})
+		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]string{"Error": "Invalid username or password"})
 		return
 	}
 
 	token, err := auth.CreateSession(user.ID)
 	if err != nil {
-		templates.ExecuteTemplate(w, "login.html", map[string]string{"Error": "Something went wrong"})
+		templates["login.html"].ExecuteTemplate(w, "layout.html", map[string]string{"Error": "Something went wrong"})
 		return
 	}
 
@@ -99,7 +111,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
 			return
 		}
-		templates.ExecuteTemplate(w, "register.html", nil)
+		templates["register.html"].ExecuteTemplate(w, "layout.html", nil)
 		return
 	}
 
@@ -107,19 +119,19 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	password := r.FormValue("password")
 
 	if len(username) < 2 || len(password) < 4 {
-		templates.ExecuteTemplate(w, "register.html", map[string]string{"Error": "Username must be at least 2 characters, password at least 4"})
+		templates["register.html"].ExecuteTemplate(w, "layout.html", map[string]string{"Error": "Username must be at least 2 characters, password at least 4"})
 		return
 	}
 
 	user, err := auth.Register(username, password)
 	if err != nil {
-		templates.ExecuteTemplate(w, "register.html", map[string]string{"Error": "Username already taken"})
+		templates["register.html"].ExecuteTemplate(w, "layout.html", map[string]string{"Error": "Username already taken"})
 		return
 	}
 
 	token, err := auth.CreateSession(user.ID)
 	if err != nil {
-		templates.ExecuteTemplate(w, "register.html", map[string]string{"Error": "Something went wrong"})
+		templates["register.html"].ExecuteTemplate(w, "layout.html", map[string]string{"Error": "Something went wrong"})
 		return
 	}
 
@@ -159,10 +171,11 @@ func handleApp(w http.ResponseWriter, r *http.Request) {
 	channels, _ := channel.List()
 
 	data := map[string]any{
-		"User":     user,
-		"Channels": channels,
+		"User":      user,
+		"Channels":  channels,
+		"CacheBust": cacheBust,
 	}
-	templates.ExecuteTemplate(w, "app.html", data)
+	templates["app.html"].ExecuteTemplate(w, "layout.html", data)
 }
 
 func handleChannels(w http.ResponseWriter, r *http.Request) {
@@ -182,7 +195,7 @@ func handleChannels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Return just the channel list partial for HTMX
-	templates.ExecuteTemplate(w, "channel-list", data)
+	templates["app.html"].ExecuteTemplate(w, "channel-list", data)
 }
 
 func handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
@@ -206,5 +219,5 @@ func handleDeleteChannel(w http.ResponseWriter, r *http.Request) {
 		"User":     user,
 		"Channels": channels,
 	}
-	templates.ExecuteTemplate(w, "channel-list", data)
+	templates["app.html"].ExecuteTemplate(w, "channel-list", data)
 }

@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vocipher — Self-hosted voice chat</title>
+    <meta name="description" content="Vocipher is a self-hosted, open-source voice chat platform. A lightweight alternative to Discord for teams and communities who want full control.">
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        :root{
+            --bg:#0a0a0f;
+            --surface:#12121a;
+            --border:#1e1e2e;
+            --accent:#7c5cfc;
+            --accent2:#5c8afc;
+            --green:#43b581;
+            --text:#e0e0e6;
+            --muted:#72767d;
+            --glow:rgba(124,92,252,0.15);
+        }
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+        body{font-family:'Inter',system-ui,sans-serif;background:var(--bg);color:var(--text);overflow-x:hidden;line-height:1.6}
+        a{color:var(--accent);text-decoration:none}
+        a:hover{color:var(--accent2)}
+
+        /* Noise overlay */
+        body::before{content:'';position:fixed;inset:0;background:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");pointer-events:none;z-index:9999}
+
+        .container{max-width:1100px;margin:0 auto;padding:0 24px}
+
+        /* Hero */
+        .hero{min-height:100vh;display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;position:relative;padding:80px 24px}
+        .hero::before{content:'';position:absolute;top:-200px;left:50%;transform:translateX(-50%);width:800px;height:800px;background:radial-gradient(circle,var(--glow) 0%,transparent 70%);pointer-events:none}
+        .logo{display:inline-flex;align-items:center;gap:14px;margin-bottom:48px;position:relative}
+        .logo-icon{width:56px;height:56px;border-radius:16px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;box-shadow:0 0 40px rgba(124,92,252,0.3)}
+        .logo-icon svg{width:28px;height:28px;fill:#fff}
+        .logo-text{font-size:28px;font-weight:800;letter-spacing:-0.5px}
+        .badge{display:inline-block;padding:6px 16px;border-radius:100px;background:var(--surface);border:1px solid var(--border);font-size:13px;font-weight:500;color:var(--muted);margin-bottom:32px}
+        .badge span{color:var(--green)}
+        h1{font-size:clamp(40px,7vw,72px);font-weight:800;line-height:1.05;letter-spacing:-2px;margin-bottom:24px;background:linear-gradient(135deg,#fff 0%,var(--text) 50%,var(--muted) 100%);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+        .subtitle{font-size:clamp(16px,2.5vw,20px);color:var(--muted);max-width:560px;margin:0 auto 48px}
+        .cta-group{display:flex;gap:16px;flex-wrap:wrap;justify-content:center}
+        .btn{display:inline-flex;align-items:center;gap:8px;padding:14px 28px;border-radius:12px;font-size:15px;font-weight:600;border:none;cursor:pointer;transition:all 0.2s}
+        .btn-primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;box-shadow:0 4px 24px rgba(124,92,252,0.3)}
+        .btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 32px rgba(124,92,252,0.4);color:#fff}
+        .btn-secondary{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+        .btn-secondary:hover{border-color:var(--accent);color:#fff;transform:translateY(-2px)}
+        .btn svg{width:18px;height:18px}
+
+        /* Terminal preview */
+        .terminal{margin-top:80px;background:var(--surface);border:1px solid var(--border);border-radius:16px;overflow:hidden;max-width:600px;width:100%;box-shadow:0 24px 80px rgba(0,0,0,0.4)}
+        .terminal-bar{display:flex;align-items:center;gap:8px;padding:12px 16px;background:rgba(0,0,0,0.3);border-bottom:1px solid var(--border)}
+        .terminal-dot{width:12px;height:12px;border-radius:50%}
+        .terminal-dot:nth-child(1){background:#f04747}
+        .terminal-dot:nth-child(2){background:#faa61a}
+        .terminal-dot:nth-child(3){background:#43b581}
+        .terminal-body{padding:20px 24px;font-family:'SF Mono','Fira Code',monospace;font-size:14px;line-height:1.8}
+        .terminal-body .prompt{color:var(--green)}
+        .terminal-body .cmd{color:var(--text)}
+        .terminal-body .output{color:var(--muted)}
+        .terminal-body .highlight{color:var(--accent)}
+
+        /* Features */
+        .features{padding:120px 0}
+        .section-label{text-align:center;font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:2px;color:var(--accent);margin-bottom:16px}
+        .section-title{text-align:center;font-size:clamp(28px,4vw,40px);font-weight:800;letter-spacing:-1px;margin-bottom:64px}
+        .feature-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:24px}
+        .feature-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:32px;transition:all 0.3s}
+        .feature-card:hover{border-color:var(--accent);transform:translateY(-4px);box-shadow:0 16px 48px rgba(0,0,0,0.3)}
+        .feature-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;margin-bottom:20px;font-size:24px}
+        .feature-icon.voice{background:rgba(124,92,252,0.15)}
+        .feature-icon.selfhost{background:rgba(67,181,129,0.15)}
+        .feature-icon.webrtc{background:rgba(92,138,252,0.15)}
+        .feature-icon.screen{background:rgba(250,166,26,0.15)}
+        .feature-icon.secure{background:rgba(240,71,71,0.15)}
+        .feature-icon.light{background:rgba(124,92,252,0.15)}
+        .feature-card h3{font-size:18px;font-weight:700;margin-bottom:8px}
+        .feature-card p{color:var(--muted);font-size:14px;line-height:1.6}
+
+        /* Architecture */
+        .arch{padding:120px 0;text-align:center}
+        .arch-diagram{display:flex;align-items:center;justify-content:center;gap:32px;flex-wrap:wrap;margin-top:48px}
+        .arch-box{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px 32px;min-width:160px}
+        .arch-box .label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
+        .arch-box .value{font-size:16px;font-weight:700}
+        .arch-arrow{color:var(--accent);font-size:24px}
+
+        /* CTA */
+        .cta-section{padding:120px 0;text-align:center}
+        .cta-section h2{font-size:clamp(28px,4vw,40px);font-weight:800;letter-spacing:-1px;margin-bottom:16px}
+        .cta-section p{color:var(--muted);font-size:18px;margin-bottom:40px}
+
+        /* Footer */
+        footer{border-top:1px solid var(--border);padding:40px 0;text-align:center;color:var(--muted);font-size:14px}
+        footer a{color:var(--muted)}
+        footer a:hover{color:var(--accent)}
+
+        @media(max-width:640px){
+            .hero{padding:60px 16px}
+            .terminal{margin-top:48px}
+            .arch-arrow{display:none}
+            .arch-diagram{flex-direction:column;gap:16px}
+        }
+    </style>
+</head>
+<body>
+
+<section class="hero">
+    <div class="logo">
+        <div class="logo-icon">
+            <svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+        </div>
+        <span class="logo-text">Vocipher</span>
+    </div>
+
+    <div class="badge"><span>Open Source</span> &middot; Self-hosted &middot; WebRTC</div>
+
+    <h1>Voice chat,<br>on your terms.</h1>
+    <p class="subtitle">A lightweight, self-hosted alternative to Discord for voice communication. Deploy on your own server, own your data, talk freely.</p>
+
+    <div class="cta-group">
+        <a href="https://github.com/kidandcat/vocipher" class="btn btn-primary">
+            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+            View on GitHub
+        </a>
+        <a href="#quickstart" class="btn btn-secondary">Quick Start</a>
+    </div>
+
+    <div class="terminal" id="quickstart">
+        <div class="terminal-bar">
+            <div class="terminal-dot"></div>
+            <div class="terminal-dot"></div>
+            <div class="terminal-dot"></div>
+        </div>
+        <div class="terminal-body">
+            <div><span class="prompt">$</span> <span class="cmd">git clone https://github.com/kidandcat/vocipher.git</span></div>
+            <div><span class="prompt">$</span> <span class="cmd">cd vocipher</span></div>
+            <div><span class="prompt">$</span> <span class="cmd">make run</span></div>
+            <div><span class="output">Vocipher server starting on <span class="highlight">http://localhost:8090</span></span></div>
+        </div>
+    </div>
+</section>
+
+<section class="features">
+    <div class="container">
+        <div class="section-label">Features</div>
+        <h2 class="section-title">Everything you need, nothing you don't.</h2>
+        <div class="feature-grid">
+            <div class="feature-card">
+                <div class="feature-icon voice">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7c5cfc" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+                </div>
+                <h3>Crystal clear voice</h3>
+                <p>Real-time audio powered by WebRTC with voice activity detection and push-to-talk support. Low-latency, high-quality audio.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon selfhost">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#43b581" stroke-width="2" stroke-linecap="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="#43b581"/><circle cx="6" cy="18" r="1" fill="#43b581"/></svg>
+                </div>
+                <h3>Self-hosted</h3>
+                <p>Deploy on your own hardware. A single Go binary with SQLite — no external dependencies, no cloud services, no tracking.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon webrtc">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#5c8afc" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+                </div>
+                <h3>SFU architecture</h3>
+                <p>Selective Forwarding Unit built with Pion. Scales to multiple users per channel without peer-to-peer mesh overhead.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon screen">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#faa61a" stroke-width="2" stroke-linecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                </div>
+                <h3>Screen sharing</h3>
+                <p>Share your screen with channel members in real-time. Preview thumbnails keep everyone aware without switching focus.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon secure">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#f04747" stroke-width="2" stroke-linecap="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+                </div>
+                <h3>Secure by default</h3>
+                <p>Bcrypt password hashing, session-based auth, and encrypted WebRTC media streams. Your conversations stay private.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon light">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7c5cfc" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                </div>
+                <h3>Lightweight</h3>
+                <p>~15MB binary. Starts in milliseconds. Runs on a $5 VPS. No Docker required, no database server, no config files.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="arch">
+    <div class="container">
+        <div class="section-label">Architecture</div>
+        <h2 class="section-title">Simple stack, powerful result.</h2>
+        <div class="arch-diagram">
+            <div class="arch-box">
+                <div class="label">Frontend</div>
+                <div class="value">HTMX + Vanilla JS</div>
+            </div>
+            <div class="arch-arrow">&rarr;</div>
+            <div class="arch-box">
+                <div class="label">Signaling</div>
+                <div class="value">WebSocket</div>
+            </div>
+            <div class="arch-arrow">&rarr;</div>
+            <div class="arch-box">
+                <div class="label">Media</div>
+                <div class="value">Pion WebRTC SFU</div>
+            </div>
+            <div class="arch-arrow">&rarr;</div>
+            <div class="arch-box">
+                <div class="label">Storage</div>
+                <div class="value">SQLite</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="cta-section">
+    <div class="container">
+        <h2>Ready to take control?</h2>
+        <p>Three commands. Your own voice server. No sign-ups, no subscriptions.</p>
+        <a href="https://github.com/kidandcat/vocipher" class="btn btn-primary">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+            Get Started
+        </a>
+    </div>
+</section>
+
+<footer>
+    <div class="container">
+        <p>Vocipher &middot; <a href="https://github.com/kidandcat/vocipher">GitHub</a> &middot; MIT License</p>
+    </div>
+</footer>
+
+</body>
+</html>
